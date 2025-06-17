@@ -69,12 +69,12 @@ Reordered Order (JSON array of strings, each string is an existing task text or 
 
     // Reconstruct the tasks array based on the order of texts provided by the LLM
     for (const itemTextFromLLM of reorderedTextItems) {
-        // --- START OF MODIFIED LOGIC ---
         let processedItemText = itemTextFromLLM.trim();
 
-        // Attempt to strip the "[ID:UUID]" part if LLM mistakenly includes it
-        // This regex ensures we only remove valid UUID patterns
-        const idPattern = /\s*\[ID:[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}\]/i;
+        // --- START OF MODIFIED LOGIC (More lenient ID stripping) ---
+        // This regex now targets anything like "[ID:any_chars_here]" at the end of the string
+        // The `.*` inside the brackets means "any character, zero or more times"
+        const idPattern = /\s*\[ID:.*?\]$/i; // Matches [ID:...] at the end of the string, case-insensitive
         if (idPattern.test(processedItemText)) {
             processedItemText = processedItemText.replace(idPattern, '').trim();
         }
