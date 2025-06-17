@@ -25,33 +25,32 @@ export async function POST(request: Request) {
 
     const model = genAI.getGenerativeModel({ model: "gemini-1.5-flash" });
 
-    // --- LLM Prompt for Reordering ---
-    // Emphasize the output format very strictly: only array of text strings.
-    const prompt = `Given the following list of tasks (format: "Task Text [ID:ID_VALUE]"), and a new task, reorder the entire list based on implied priority, urgency, or logical grouping. Your output MUST be a JSON array of strings, where each string is the exact "Task Text" from an original task OR the exact text of the new task if it should be included. Do NOT include "[ID:ID_VALUE]" or any other text, numbers, or explanations in the output array. Ensure all original task texts and the new task text are present in the reordered list.
+    // --- CRUCIAL CHANGE TO PROMPT: Ask for IDs ---
+    const prompt = `Given the following list of tasks (format: "Task Text [ID:ID_VALUE]"), and a new task, reorder the entire list based on implied priority, urgency, or logical grouping. Your output MUST be a JSON array of strings, where each string is the **ID** of a task from the original list OR the new task's placeholder ID if it should be included. Do NOT include task text, numbers, or any other explanations. Ensure all original task IDs and the new task's placeholder ID are present in the reordered list.
 
 Tasks:
 ${tasks.map((task: Task) => `${task.text} [ID:${task.id}]`).join('\n')}
 
-New Task: "${newTaskText}"
+New Task: "${newTaskText}" [ID:NEW_TASK_PLACEHOLDER]
 
-Reordered Order (JSON array of strings, each string is an existing task text or the new task text):`;
+Reordered Order (JSON array of task IDs or "NEW_TASK_PLACEHOLDER"):`;
 
-    console.log("Sending prompt to Gemini:", prompt);
+    console.log("Sending prompt to Gemini (asking for IDs):", prompt);
 
     const result = await model.generateContent(prompt);
     const response = await result.response;
     const llmRawText = response.text().replace(/```json\n|\n```/g, '').trim();
 
-    console.log("Gemini raw response:", llmRawText);
+    console.log("Gemini raw response (expected IDs):", llmRawText);
 
-    let reorderedTextItems: string[] = [];
+    let reorderedIds: string[] = [];
     try {
-        reorderedTextItems = JSON.parse(llmRawText);
-        if (!Array.isArray(reorderedTextItems)) {
-            throw new Error("LLM response was not a JSON array of strings.");
+        reorderedIds = JSON.parse(llmRawText);
+        if (!Array.isArray(reorderedIds) || !reorderedIds.every(item => typeof item === 'string')) {
+            throw new Error("LLM response was not a JSON array of strings (IDs).");
         }
     } catch (parseError) {
-        console.error("Failed to parse LLM response as JSON array of texts:", parseError, llmRawText);
+        console.error("Failed to parse LLM response as JSON array of IDs:", parseError, llmRawText);
         // Fallback if parsing fails: add new task to the end of original tasks.
         const newTaskId = crypto.randomUUID();
         const newLLMTask: Task = { id: newTaskId, text: newTaskText, completed: false, priorityScore: 0, createdAt: Date.now() };
@@ -59,35 +58,17 @@ Reordered Order (JSON array of strings, each string is an existing task text or 
     }
 
     const finalReorderedTasks: Task[] = [];
-    // Create a map for efficient lookup of existing tasks by their TEXT (lowercase for robust matching)
-    // Also store the original Task object
-    const existingTaskMap = new Map(tasks.map((task: Task) => [task.text.toLowerCase(), task]));
+    // Create a map for efficient lookup of existing tasks by their ID
+    const existingTaskMap = new Map(tasks.map((task: Task) => [task.id, task]));
     let isNewTaskAdded = false;
 
-    // Normalize the new task text for comparison
-    const normalizedNewTaskText = newTaskText.trim().toLowerCase();
-
-    // Reconstruct the tasks array based on the order of texts provided by the LLM
-    for (const itemTextFromLLM of reorderedTextItems) {
-        let processedItemText = itemTextFromLLM.trim();
-
-        // --- START OF MODIFIED LOGIC (More lenient ID stripping) ---
-        // This regex now targets anything like "[ID:any_chars_here]" at the end of the string
-        // The `.*` inside the brackets means "any character, zero or more times"
-        const idPattern = /\s*\[ID:.*?\]$/i; // Matches [ID:...] at the end of the string, case-insensitive
-        if (idPattern.test(processedItemText)) {
-            processedItemText = processedItemText.replace(idPattern, '').trim();
-        }
-        // --- END OF MODIFIED LOGIC ---
-
-        const normalizedProcessedItemText = processedItemText.toLowerCase();
-
-        // Check if it's an existing task's text
-        if (existingTaskMap.has(normalizedProcessedItemText)) {
-            finalReorderedTasks.push(existingTaskMap.get(normalizedProcessedItemText)!);
-            existingTaskMap.delete(normalizedProcessedItemText); // Remove from map to track what's been added
-        } else if (normalizedProcessedItemText === normalizedNewTaskText && !isNewTaskAdded) {
-            // If it's the exact text of the new task and it hasn't been added yet
+    // Reconstruct the tasks array based on the order of IDs provided by the LLM
+    for (const idFromLLM of reorderedIds) {
+        if (existingTaskMap.has(idFromLLM)) {
+            finalReorderedTasks.push(existingTaskMap.get(idFromLLM)!);
+            existingTaskMap.delete(idFromLLM); // Remove from map to track what's been added
+        } else if (idFromLLM === "NEW_TASK_PLACEHOLDER" && !isNewTaskAdded) {
+            // If it's the placeholder for the new task
             finalReorderedTasks.push({
                 id: crypto.randomUUID(), // Assign a new unique ID to this task
                 text: newTaskText, // Use original newTaskText for the actual task
@@ -97,19 +78,19 @@ Reordered Order (JSON array of strings, each string is an existing task text or 
             });
             isNewTaskAdded = true; // Mark that the new task has been added
         } else {
-            console.warn(`LLM returned unrecognized or rephrased item: "${itemTextFromLLM}". Attempted to process as "${processedItemText}". Skipping.`);
+            console.warn(`LLM returned unrecognized ID or duplicate: "${idFromLLM}". Skipping.`);
         }
     }
 
     // Fallback: Add any original tasks that the LLM might have omitted from its response
     existingTaskMap.forEach(task => {
-        console.warn(`Task "${task.text}" (ID: ${task.id}) was not returned by LLM's reordered list (or was rephrased unrecognized). Adding to end as a fallback.`);
+        console.warn(`Task "${task.text}" (ID: ${task.id}) was not returned by LLM's reordered list. Adding to end as a fallback.`);
         finalReorderedTasks.push(task);
     });
 
-    // Fallback: Ensure the new task is added even if the LLM somehow missed it or rephrased it slightly
+    // Fallback: Ensure the new task is added even if the LLM somehow missed its placeholder
     if (!isNewTaskAdded) {
-        console.warn("New task was not found in LLM's reordered list by exact text match (or was rephrased unrecognized). Adding it to the end as a fallback.");
+        console.warn("New task was not found in LLM's reordered list. Adding it to the end as a fallback.");
         finalReorderedTasks.push({
             id: crypto.randomUUID(),
             text: newTaskText,
